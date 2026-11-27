@@ -1695,22 +1695,22 @@ class PaymentAttributes:
     """The merchant's internal reference for this payment.
     """
     card_first_digits: Optional[str] = field(default=None, metadata={"wire_name": "card_first_digits"})
-    """The first 6 digits of the card number. Null for non-card payment methods or card payments without a token.
+    """The first 6 digits of the card number. Includes EDC payments, using the card the partner app reports at capture. Null for non-card payment methods or card payments without card details, such as an EDC payment before capture.
     """
     card_last_digits: Optional[str] = field(default=None, metadata={"wire_name": "card_last_digits"})
-    """The last 2 digits of the card number. Null for non-card payment methods or card payments without a token.
+    """The last 2 digits of the card number. Includes EDC payments, using the card the partner app reports at capture. Null for non-card payment methods or card payments without card details, such as an EDC payment before capture.
     """
     card_masked_number: Optional[str] = field(default=None, metadata={"wire_name": "card_masked_number"})
-    """The card number with the first 6 and last 2 digits visible and the rest masked. Null for non-card payment methods or card payments without a token.
+    """The card number with the first 6 and last 2 digits visible and the rest masked. Includes EDC payments, using the card the partner app reports at capture. Null for non-card payment methods or card payments without card details, such as an EDC payment before capture.
     """
     card_network: Optional[str] = field(default=None, metadata={"wire_name": "card_network"})
-    """The card network, such as visa or mastercard. Null for non-card payment methods or card payments without a token.
+    """The card network, such as visa or mastercard. Includes EDC payments, using the card the partner app reports at capture. Null for non-card payment methods or card payments without card details, such as an EDC payment before capture.
     """
     cardholder_name: Optional[str] = field(default=None, metadata={"wire_name": "cardholder_name"})
-    """The cardholder's name as entered on the card. Null for non-card payment methods, card payments without a token, or when no name was entered.
+    """The cardholder's name as entered on the card. Null for non-card payment methods, card payments without card details, or when no name was entered. Always null for EDC payments, as the partner app only reports the card number digits.
     """
     card_expiration_date: Optional[str] = field(default=None, metadata={"wire_name": "card_expiration_date"})
-    """The card's expiration date as captured, usually in MM/YY format. Null for non-card payment methods, card payments without a token, or when no expiration date was captured.
+    """The card's expiration date as captured, usually in MM/YY format. Null for non-card payment methods, card payments without card details, or when no expiration date was captured. Always null for EDC payments, as the partner app only reports the card number digits.
     """
     authorized_at: Optional[float] = field(default=None, metadata={"wire_name": "authorized_at"})
     """When the payment was authorized (Unix timestamp).
@@ -1887,6 +1887,9 @@ class FilterPayoutsArgs:
     contact_id: Optional[str] = field(default=None, metadata={"wire_name": "contact_id"})
     """Filter by contact ID. Accepts either internal UID (starting with `ctc_` ) or external ID. Examples: `ctc_1234567890` or `ext_1234567890`
     """
+    batch_id: Optional[str] = field(default=None, metadata={"wire_name": "batch_id"})
+    """Filter by the payout batch that created the payout. Example: `bat_1234567890`
+    """
     terms: Optional[str] = field(default=None, metadata={"wire_name": "terms"})
     """Full-text search across payout content. Searches payout method names. Uses fuzzy matching for partial text matches.
     """
@@ -1905,6 +1908,7 @@ class FilterPayoutsArgs:
             amount=d.get("amount"),
             bank_code=d.get("bank_code"),
             contact_id=d.get("contact_id"),
+            batch_id=d.get("batch_id"),
             terms=d.get("terms"),
         )
 
@@ -2316,11 +2320,14 @@ class FindBatchResult:
     type: Literal["PAYMENT_LINK", "PAYOUT"] = field(metadata={"wire_name": "type"})
     """The type of records in this batch. One of: "PAYMENT_LINK", "PAYOUT".
     """
-    status: Literal["CREATED", "PREPARING", "PREPARED", "PROCESSING", "COMPLETED"] = field(metadata={"wire_name": "status"})
-    """The current processing status of the batch. One of: "CREATED", "PREPARING", "PREPARED", "PROCESSING", "COMPLETED".
+    status: Literal["CREATED", "PREPARING", "PREPARED", "PROCESSING", "COMPLETED", "FAILED"] = field(metadata={"wire_name": "status"})
+    """The current processing status of the batch. One of: "CREATED", "PREPARING", "PREPARED", "PROCESSING", "COMPLETED", "FAILED".
     """
     created_at: float = field(metadata={"wire_name": "created_at"})
     """The timestamp when the batch was created.
+    """
+    awaiting_authorization: bool = field(metadata={"wire_name": "awaiting_authorization"})
+    """True when any payout in this batch is still in the requested state.
     """
     output_url: Optional[str] = field(default=None, metadata={"wire_name": "output_url"})
     """The URL to download the result xlsx file. Present when the batch has completed.
@@ -2339,6 +2346,7 @@ class FindBatchResult:
             type=d["type"],
             status=d["status"],
             created_at=d["created_at"],
+            awaiting_authorization=d["awaiting_authorization"],
             output_url=d.get("output_url"),
             preview_url=d.get("preview_url"),
             error_message=d.get("error_message"),
@@ -2596,8 +2604,14 @@ class FindDisputeResult:
     conceded: Literal[True, False] = field(metadata={"wire_name": "conceded"})
     """Whether the dispute has been conceded by the merchant. This can be true only when the dispute is in the LOST state. One of: True, False.
     """
+    challenge_fee_waived: Literal[True, False] = field(metadata={"wire_name": "challenge_fee_waived"})
+    """Whether the challenge fee is waived for this dispute. One of: True, False.
+    """
     evidences: List[DisputeEvidenceAttributes] = field(metadata={"wire_name": "evidences"})
     """The evidence submitted for this dispute.
+    """
+    entries: List[EntryAttributes] = field(metadata={"wire_name": "entries"})
+    """The merchant ledger entries associated with this dispute.
     """
     contact_id: Optional[str] = field(default=None, metadata={"wire_name": "contact_id"})
     """The ID of the contact who made the payment.
@@ -2634,7 +2648,9 @@ class FindDisputeResult:
             created_at=d["created_at"],
             fees=([FeeAttributes._from_dict(_item) for _item in (_raw_fees or [])]) if (_raw_fees := d["fees"]) is not None else None,
             conceded=d["conceded"],
+            challenge_fee_waived=d["challenge_fee_waived"],
             evidences=([DisputeEvidenceAttributes._from_dict(_item) for _item in (_raw_evidences or [])]) if (_raw_evidences := d["evidences"]) is not None else None,
+            entries=([EntryAttributes._from_dict(_item) for _item in (_raw_entries or [])]) if (_raw_entries := d["entries"]) is not None else None,
             contact_id=d.get("contact_id"),
             message=d.get("message"),
             challenge_received_at=d.get("challenge_received_at"),
@@ -2926,22 +2942,22 @@ class FindPaymentResult:
     """The merchant's internal reference for this payment.
     """
     card_first_digits: Optional[str] = field(default=None, metadata={"wire_name": "card_first_digits"})
-    """The first 6 digits of the card number. Null for non-card payment methods or card payments without a token.
+    """The first 6 digits of the card number. Includes EDC payments, using the card the partner app reports at capture. Null for non-card payment methods or card payments without card details, such as an EDC payment before capture.
     """
     card_last_digits: Optional[str] = field(default=None, metadata={"wire_name": "card_last_digits"})
-    """The last 2 digits of the card number. Null for non-card payment methods or card payments without a token.
+    """The last 2 digits of the card number. Includes EDC payments, using the card the partner app reports at capture. Null for non-card payment methods or card payments without card details, such as an EDC payment before capture.
     """
     card_masked_number: Optional[str] = field(default=None, metadata={"wire_name": "card_masked_number"})
-    """The card number with the first 6 and last 2 digits visible and the rest masked. Null for non-card payment methods or card payments without a token.
+    """The card number with the first 6 and last 2 digits visible and the rest masked. Includes EDC payments, using the card the partner app reports at capture. Null for non-card payment methods or card payments without card details, such as an EDC payment before capture.
     """
     card_network: Optional[str] = field(default=None, metadata={"wire_name": "card_network"})
-    """The card network, such as visa or mastercard. Null for non-card payment methods or card payments without a token.
+    """The card network, such as visa or mastercard. Includes EDC payments, using the card the partner app reports at capture. Null for non-card payment methods or card payments without card details, such as an EDC payment before capture.
     """
     cardholder_name: Optional[str] = field(default=None, metadata={"wire_name": "cardholder_name"})
-    """The cardholder's name as entered on the card. Null for non-card payment methods, card payments without a token, or when no name was entered.
+    """The cardholder's name as entered on the card. Null for non-card payment methods, card payments without card details, or when no name was entered. Always null for EDC payments, as the partner app only reports the card number digits.
     """
     card_expiration_date: Optional[str] = field(default=None, metadata={"wire_name": "card_expiration_date"})
-    """The card's expiration date as captured, usually in MM/YY format. Null for non-card payment methods, card payments without a token, or when no expiration date was captured.
+    """The card's expiration date as captured, usually in MM/YY format. Null for non-card payment methods, card payments without card details, or when no expiration date was captured. Always null for EDC payments, as the partner app only reports the card number digits.
     """
     authorized_at: Optional[float] = field(default=None, metadata={"wire_name": "authorized_at"})
     """When the payment was authorized (Unix timestamp).
@@ -4325,7 +4341,7 @@ class ListBatchesArgs:
     """
 
     type: Optional[Literal["PAYMENT_LINK", "PAYOUT"]] = field(default=None, metadata={"wire_name": "type"})
-    """Filter by batch type. When omitted, all batch types are returned. One of: "PAYMENT_LINK", "PAYOUT".
+    """Filter by batch type. When omitted, every batch type the caller can read is returned. One of: "PAYMENT_LINK", "PAYOUT".
     """
     per_page: Optional[float] = field(default=None, metadata={"wire_name": "per_page"})
     """Number of batches to return per page (default: 25)
@@ -4358,11 +4374,14 @@ class BatchAttributes:
     type: Literal["PAYMENT_LINK", "PAYOUT"] = field(metadata={"wire_name": "type"})
     """The type of records in this batch. One of: "PAYMENT_LINK", "PAYOUT".
     """
-    status: Literal["CREATED", "PREPARING", "PREPARED", "PROCESSING", "COMPLETED"] = field(metadata={"wire_name": "status"})
-    """The current processing status of the batch. One of: "CREATED", "PREPARING", "PREPARED", "PROCESSING", "COMPLETED".
+    status: Literal["CREATED", "PREPARING", "PREPARED", "PROCESSING", "COMPLETED", "FAILED"] = field(metadata={"wire_name": "status"})
+    """The current processing status of the batch. One of: "CREATED", "PREPARING", "PREPARED", "PROCESSING", "COMPLETED", "FAILED".
     """
     created_at: float = field(metadata={"wire_name": "created_at"})
     """The timestamp when the batch was created.
+    """
+    awaiting_authorization: bool = field(metadata={"wire_name": "awaiting_authorization"})
+    """True when any payout in this batch is still in the requested state.
     """
     output_url: Optional[str] = field(default=None, metadata={"wire_name": "output_url"})
     """The URL to download the result xlsx file. Present when the batch has completed.
@@ -4381,6 +4400,7 @@ class BatchAttributes:
             type=d["type"],
             status=d["status"],
             created_at=d["created_at"],
+            awaiting_authorization=d["awaiting_authorization"],
             output_url=d.get("output_url"),
             preview_url=d.get("preview_url"),
             error_message=d.get("error_message"),
@@ -4506,8 +4526,14 @@ class DisputeAttributes:
     conceded: Literal[True, False] = field(metadata={"wire_name": "conceded"})
     """Whether the dispute has been conceded by the merchant. This can be true only when the dispute is in the LOST state. One of: True, False.
     """
+    challenge_fee_waived: Literal[True, False] = field(metadata={"wire_name": "challenge_fee_waived"})
+    """Whether the challenge fee is waived for this dispute. One of: True, False.
+    """
     evidences: List[DisputeEvidenceAttributes] = field(metadata={"wire_name": "evidences"})
     """The evidence submitted for this dispute.
+    """
+    entries: List[EntryAttributes] = field(metadata={"wire_name": "entries"})
+    """The merchant ledger entries associated with this dispute.
     """
     contact_id: Optional[str] = field(default=None, metadata={"wire_name": "contact_id"})
     """The ID of the contact who made the payment.
@@ -4544,7 +4570,9 @@ class DisputeAttributes:
             created_at=d["created_at"],
             fees=([FeeAttributes._from_dict(_item) for _item in (_raw_fees or [])]) if (_raw_fees := d["fees"]) is not None else None,
             conceded=d["conceded"],
+            challenge_fee_waived=d["challenge_fee_waived"],
             evidences=([DisputeEvidenceAttributes._from_dict(_item) for _item in (_raw_evidences or [])]) if (_raw_evidences := d["evidences"]) is not None else None,
+            entries=([EntryAttributes._from_dict(_item) for _item in (_raw_entries or [])]) if (_raw_entries := d["entries"]) is not None else None,
             contact_id=d.get("contact_id"),
             message=d.get("message"),
             challenge_received_at=d.get("challenge_received_at"),
@@ -9454,12 +9482,14 @@ class Client:
 
         Cancels a payment that should not go through. The customer is not charged for a cancelled payment.
 
-        Payments in a `PENDING` status, and payments in a `SUCCESSFUL` status that have not been
-        settled yet, can be cancelled. Once a payment is cancelled, its status changes to `CANCELLED`.
+        Payments in a `PENDING` status, payments in an `AUTHORIZED` status whose authorization has not
+        expired yet, and payments in a `SUCCESSFUL` status that have not been settled yet, can be
+        cancelled. Cancelling an `AUTHORIZED` payment releases the hold on the customer's funds. Once a
+        payment is cancelled, its status changes to `CANCELLED`.
 
         Raises:
             webfunction.BadRequestError: code "NOT_FOUND" - This error occurs when no payment with the provided ID exists in your merchant account. Double check that you're using the correct payment ID.
-            webfunction.BadRequestError: code "NOT_CANCELLABLE" - Payment is not eligible for cancellation. This can happen if the payment is not in a `PENDING` or `SUCCESSFUL` status, has already been settled, or its payment method does not support cancellations.
+            webfunction.BadRequestError: code "NOT_CANCELLABLE" - Payment is not eligible for cancellation. This can happen if the payment is not in a `PENDING`, `AUTHORIZED` or `SUCCESSFUL` status, its authorization has expired, it has already been settled, or its payment method does not support cancellations.
             webfunction.UnexpectedStatusCodeError: if the server responds with a non-200/400 status
             webfunction.JsonParseError: if the response body isn't valid JSON
         """
@@ -9814,14 +9844,14 @@ class Client:
 
         This endpoint provides comprehensive search functionality using the SearchIndex infrastructure,
         allowing you to filter payouts by various criteria including status, payout method, currency,
-        amount ranges, and date ranges.
+        batch, amount ranges, and date ranges.
 
         The response includes pagination controls with `previous` and `next` cursors that can be used
         to navigate through the payout history efficiently.
 
         ### Features:
         - **Full-text search**: Search across payout content
-        - **Advanced filtering**: Filter by status, payout method, currency, amount, and dates
+        - **Advanced filtering**: Filter by status, payout method, currency, batch, amount, and dates
         - **Date range support**: Support for specific dates, datetimes, date ranges, datetime ranges, and keywords
         - **Pagination**: Efficient cursor-based pagination
         - **Merchant-scoped**: Only returns payouts for the authenticated merchant
@@ -9903,7 +9933,7 @@ class Client:
 
         Retrieve a batch by ID, including its current status, any prepare or processing error,
         the preview download URL when prepare has completed, and the result download URL when
-        processing has completed.
+        processing has completed. `awaiting_authorization` is true when any payout in the batch is still requested.
 
         Raises:
             webfunction.BadRequestError: code "NOT_FOUND" - The batch was not found.
@@ -10327,6 +10357,8 @@ class Client:
         """## List batches
 
         Returns a paginated list of batches for the authenticated merchant, newest first.
+        A caller only receives batch types their permissions allow.
+        `awaiting_authorization` is true when any payout in the batch is still requested.
 
         Optionally filter by `type` to return only batches of that kind (for example `PAYMENT_LINK`).
 
@@ -12643,12 +12675,14 @@ class AsyncClient:
 
         Cancels a payment that should not go through. The customer is not charged for a cancelled payment.
 
-        Payments in a `PENDING` status, and payments in a `SUCCESSFUL` status that have not been
-        settled yet, can be cancelled. Once a payment is cancelled, its status changes to `CANCELLED`.
+        Payments in a `PENDING` status, payments in an `AUTHORIZED` status whose authorization has not
+        expired yet, and payments in a `SUCCESSFUL` status that have not been settled yet, can be
+        cancelled. Cancelling an `AUTHORIZED` payment releases the hold on the customer's funds. Once a
+        payment is cancelled, its status changes to `CANCELLED`.
 
         Raises:
             webfunction.BadRequestError: code "NOT_FOUND" - This error occurs when no payment with the provided ID exists in your merchant account. Double check that you're using the correct payment ID.
-            webfunction.BadRequestError: code "NOT_CANCELLABLE" - Payment is not eligible for cancellation. This can happen if the payment is not in a `PENDING` or `SUCCESSFUL` status, has already been settled, or its payment method does not support cancellations.
+            webfunction.BadRequestError: code "NOT_CANCELLABLE" - Payment is not eligible for cancellation. This can happen if the payment is not in a `PENDING`, `AUTHORIZED` or `SUCCESSFUL` status, its authorization has expired, it has already been settled, or its payment method does not support cancellations.
             webfunction.UnexpectedStatusCodeError: if the server responds with a non-200/400 status
             webfunction.JsonParseError: if the response body isn't valid JSON
         """
@@ -13003,14 +13037,14 @@ class AsyncClient:
 
         This endpoint provides comprehensive search functionality using the SearchIndex infrastructure,
         allowing you to filter payouts by various criteria including status, payout method, currency,
-        amount ranges, and date ranges.
+        batch, amount ranges, and date ranges.
 
         The response includes pagination controls with `previous` and `next` cursors that can be used
         to navigate through the payout history efficiently.
 
         ### Features:
         - **Full-text search**: Search across payout content
-        - **Advanced filtering**: Filter by status, payout method, currency, amount, and dates
+        - **Advanced filtering**: Filter by status, payout method, currency, batch, amount, and dates
         - **Date range support**: Support for specific dates, datetimes, date ranges, datetime ranges, and keywords
         - **Pagination**: Efficient cursor-based pagination
         - **Merchant-scoped**: Only returns payouts for the authenticated merchant
@@ -13092,7 +13126,7 @@ class AsyncClient:
 
         Retrieve a batch by ID, including its current status, any prepare or processing error,
         the preview download URL when prepare has completed, and the result download URL when
-        processing has completed.
+        processing has completed. `awaiting_authorization` is true when any payout in the batch is still requested.
 
         Raises:
             webfunction.BadRequestError: code "NOT_FOUND" - The batch was not found.
@@ -13516,6 +13550,8 @@ class AsyncClient:
         """## List batches
 
         Returns a paginated list of batches for the authenticated merchant, newest first.
+        A caller only receives batch types their permissions allow.
+        `awaiting_authorization` is true when any payout in the batch is still requested.
 
         Optionally filter by `type` to return only batches of that kind (for example `PAYMENT_LINK`).
 
